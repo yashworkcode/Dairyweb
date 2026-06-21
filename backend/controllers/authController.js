@@ -283,65 +283,43 @@ const googleLogin = async (req, res, next) => {
  * Sends a one-time login code to an existing account's email, as an
  * alternative to typing a password.
  */
-const sendLoginOtp = async (req, res, next) => {
+const sendOtpEmail = async (email, code, purpose = "signup") => {
   try {
-    console.log("STEP 1");
+    console.log("EMAIL STEP 1");
 
-    const { email } = req.body;
-    console.log("STEP 2:", email);
+    const transporter = getMailTransporter();
 
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "Email is required",
-      });
+    console.log("EMAIL STEP 2");
+
+    const copy = OTP_COPY[purpose] || OTP_COPY.signup;
+
+    if (!transporter) {
+      console.log("EMAIL STEP 3 - NO TRANSPORTER");
+      return;
     }
 
-    const normalizedEmail = email.toLowerCase().trim();
-    console.log("STEP 3");
-    console.log('1');
-    const user = await User.findOne({ email: normalizedEmail });
-    console.log("STEP 4:", !!user);
-    console.log('2');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "No account found with this email",
-      });
-    }
-console.log('3');
-    const code = generateOtpCode();
-    console.log("STEP 5");
-console.log('4');
-    await Otp.deleteMany({
-      identifier: normalizedEmail,
-      channel: "email",
-      purpose: "login",
+    console.log("EMAIL STEP 4 - SENDING");
+
+    const result = await transporter.sendMail({
+      from:
+        process.env.SMTP_FROM ||
+        "Vaishnavi Milk Dairy <no-reply@vaishnavimilkdairy.com>",
+      to: email,
+      subject: copy.subject,
+      html: `
+        <p>${copy.intro}</p>
+        <h2>${code}</h2>
+      `,
     });
-    console.log("STEP 6");
-console.log('5');
-    await Otp.create({
-      identifier: normalizedEmail,
-      channel: "email",
-      purpose: "login",
-      code,
-    });
-    console.log("STEP 7");
-console.log('6');
-    await sendOtpEmail(normalizedEmail, code, "login");
-    console.log("STEP 8");
-console.log('7');
-    res.json({
-      success: true,
-      message: "Login code sent to your email",
-    });
+
+    console.log("EMAIL STEP 5 - SUCCESS");
+    console.log(result);
+
   } catch (error) {
-    console.error("LOGIN OTP ERROR:", error);
-console.log('8');
-    return res.status(500).json({
-      success: false,
-      message: error.message,
-    });
+    console.error("EMAIL ERROR:");
+    console.error(error);
+
+    throw error;
   }
 };
 
