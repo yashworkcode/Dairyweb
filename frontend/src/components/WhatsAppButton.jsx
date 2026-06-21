@@ -1,5 +1,5 @@
 const WhatsAppButton = () => {
-  const number = "7619887132";
+  const number = "9506236287";
   const message = encodeURIComponent("Hi! I'd like to know more about Vaishnavi Milk Dairy's delivery service.");
 
   return (
