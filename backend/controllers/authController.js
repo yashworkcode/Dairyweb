@@ -283,43 +283,34 @@ const googleLogin = async (req, res, next) => {
  * Sends a one-time login code to an existing account's email, as an
  * alternative to typing a password.
  */
-const sendOtpEmail = async (email, code, purpose = "signup") => {
+const sendLoginOtp = async (req, res, next) => {
   try {
-    console.log("EMAIL STEP 1");
+    const { email } = req.body;
 
-    const transporter = getMailTransporter();
-
-    console.log("EMAIL STEP 2");
-
-    const copy = OTP_COPY[purpose] || OTP_COPY.signup;
-
-    if (!transporter) {
-      console.log("EMAIL STEP 3 - NO TRANSPORTER");
-      return;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
     }
 
-    console.log("EMAIL STEP 4 - SENDING");
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: normalizedEmail });
 
-    const result = await transporter.sendMail({
-      from:
-        process.env.SMTP_FROM ||
-        "Vaishnavi Milk Dairy <no-reply@vaishnavimilkdairy.com>",
-      to: email,
-      subject: copy.subject,
-      html: `
-        <p>${copy.intro}</p>
-        <h2>${code}</h2>
-      `,
-    });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "No account found with this email",
+      });
+    }
 
-    console.log("EMAIL STEP 5 - SUCCESS");
-    console.log(result);
+    const code = generateOtpCode();
 
+    await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "login" });
+    await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "login", code });
+
+    await sendOtpEmail(normalizedEmail, code, "login");
+
+    res.json({ success: true, message: "Login code sent to your email" });
   } catch (error) {
-    console.error("EMAIL ERROR:");
-    console.error(error);
-
-    throw error;
+    next(error);
   }
 };
 
