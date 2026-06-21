@@ -299,27 +299,27 @@ const sendLoginOtp = async (req, res, next) => {
 
     const normalizedEmail = email.toLowerCase().trim();
     console.log("STEP 3");
-
+    console.log('1');
     const user = await User.findOne({ email: normalizedEmail });
     console.log("STEP 4:", !!user);
-
+    console.log('2');
     if (!user) {
       return res.status(404).json({
         success: false,
         message: "No account found with this email",
       });
     }
-
+console.log('3');
     const code = generateOtpCode();
     console.log("STEP 5");
-
+console.log('4');
     await Otp.deleteMany({
       identifier: normalizedEmail,
       channel: "email",
       purpose: "login",
     });
     console.log("STEP 6");
-
+console.log('5');
     await Otp.create({
       identifier: normalizedEmail,
       channel: "email",
@@ -327,17 +327,17 @@ const sendLoginOtp = async (req, res, next) => {
       code,
     });
     console.log("STEP 7");
-
+console.log('6');
     await sendOtpEmail(normalizedEmail, code, "login");
     console.log("STEP 8");
-
+console.log('7');
     res.json({
       success: true,
       message: "Login code sent to your email",
     });
   } catch (error) {
     console.error("LOGIN OTP ERROR:", error);
-
+console.log('8');
     return res.status(500).json({
       success: false,
       message: error.message,
