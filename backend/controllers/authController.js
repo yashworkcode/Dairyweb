@@ -7,11 +7,7 @@ const { generateOtpCode, sendOtpEmail } = require("../utils/sendOtp");
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
-/**
- * Builds a public-safe user object for API responses.
- * Never include the password hash, even though the User model's
- * toJSON transform already strips it as a second line of defense.
- */
+/** Builds a public-safe user object — never exposes the password hash. */
 const toPublicUser = (user) => ({
   id: user._id,
   name: user.name,
@@ -23,11 +19,7 @@ const toPublicUser = (user) => ({
   isVerified: user.isVerified,
 });
 
-/**
- * Turns an email's local part into a unique, valid username.
- * Used to auto-provision a username for Google sign-ins, which don't
- * collect one from the person directly.
- */
+/** Turns an email local-part into a unique, collision-free username. */
 const generateUniqueUsername = async (baseSeed) => {
   const base =
     baseSeed
@@ -37,21 +29,49 @@ const generateUniqueUsername = async (baseSeed) => {
 
   let candidate = base;
   let suffix = 0;
-
-  // Keep trying until we find a username that isn't taken yet.
   while (await User.findOne({ username: candidate })) {
     suffix += 1;
     candidate = `${base}${suffix}`;
   }
-
   return candidate;
 };
 
 /**
+ * Shared OTP verification helper.
+ * Returns { ok: true } or { ok: false, status, message }.
+ * Mutates otpRecord (increments attempts) and saves on failure.
+ */
+const verifyOtpRecord = async (otpRecord, submittedCode) => {
+  if (!otpRecord) {
+    return { ok: false, status: 400, message: "OTP expired or not found. Please request a new one." };
+  }
+
+  if (otpRecord.attempts >= 5) {
+    await otpRecord.deleteOne();
+    return { ok: false, status: 429, message: "Too many incorrect attempts. Please request a new OTP." };
+  }
+
+  // Normalise to string so numeric OTPs from the frontend still match
+  if (String(otpRecord.code) !== String(submittedCode).trim()) {
+    otpRecord.attempts += 1;
+    await otpRecord.save();
+    const remaining = 5 - otpRecord.attempts;
+    return {
+      ok: false,
+      status: 400,
+      message: `Invalid OTP. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`,
+    };
+  }
+
+  return { ok: true };
+};
+
+// ─── Signup OTP ───────────────────────────────────────────────────────────────
+
+/**
  * POST /api/auth/send-otp
  * body: { identifier: string, channel: "email" }
- * Generates a 6 digit OTP for email verification and dispatches it.
- * Used during signup only (Email OTP verification), never for login.
+ * Sends a verification OTP for new account registration.
  */
 const sendOtp = async (req, res, next) => {
   try {
@@ -66,6 +86,11 @@ const sendOtp = async (req, res, next) => {
 
     const email = identifier.toLowerCase().trim();
 
+    // Basic email format check
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ success: false, message: "Invalid email address" });
+    }
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(400).json({
@@ -74,12 +99,27 @@ const sendOtp = async (req, res, next) => {
       });
     }
 
-    const code = generateOtpCode();
+    // Enforce a 60-second cooldown between resend requests
+    const recent = await Otp.findOne({
+      identifier: email,
+      channel: "email",
+      purpose: "signup",
+    }).sort({ createdAt: -1 });
 
-    // Replace any previous unused OTP for this email.
+    if (recent) {
+      const secondsAgo = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
+      if (secondsAgo < 60) {
+        const wait = Math.ceil(60 - secondsAgo);
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${wait} second${wait === 1 ? "" : "s"} before requesting a new OTP.`,
+        });
+      }
+    }
+
+    const code = generateOtpCode();
     await Otp.deleteMany({ identifier: email, channel: "email", purpose: "signup" });
     await Otp.create({ identifier: email, channel: "email", purpose: "signup", code });
-
     await sendOtpEmail(email, code, "signup");
 
     res.json({ success: true, message: "OTP sent to your email" });
@@ -88,10 +128,11 @@ const sendOtp = async (req, res, next) => {
   }
 };
 
+// ─── Register ─────────────────────────────────────────────────────────────────
+
 /**
  * POST /api/auth/register
  * body: { name, username, email, password, otp }
- * Verifies the email OTP, hashes the password, and creates the account.
  */
 const register = async (req, res, next) => {
   try {
@@ -120,25 +161,9 @@ const register = async (req, res, next) => {
       purpose: "signup",
     }).sort({ createdAt: -1 });
 
-    if (!otpRecord) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP expired or not found. Please request a new one.",
-      });
-    }
-
-    if (otpRecord.attempts >= 5) {
-      await otpRecord.deleteOne();
-      return res.status(429).json({
-        success: false,
-        message: "Too many incorrect attempts. Please request a new OTP.",
-      });
-    }
-
-    if (otpRecord.code !== otp) {
-      otpRecord.attempts += 1;
-      await otpRecord.save();
-      return res.status(400).json({ success: false, message: "Invalid OTP" });
+    const check = await verifyOtpRecord(otpRecord, otp);
+    if (!check.ok) {
+      return res.status(check.status).json({ success: false, message: check.message });
     }
 
     const existingUser = await User.findOne({
@@ -148,7 +173,10 @@ const register = async (req, res, next) => {
     if (existingUser) {
       return res.status(400).json({
         success: false,
-        message: "Email or username already exists",
+        message:
+          existingUser.email === normalizedEmail
+            ? "An account with this email already exists."
+            : "This username is already taken.",
       });
     }
 
@@ -163,7 +191,6 @@ const register = async (req, res, next) => {
       isVerified: true,
     });
 
-    // OTP is valid and consumed - delete it only after the account is created.
     await otpRecord.deleteOne();
 
     res.status(201).json({
@@ -176,9 +203,11 @@ const register = async (req, res, next) => {
   }
 };
 
+// ─── Password Login ───────────────────────────────────────────────────────────
+
 /**
  * POST /api/auth/login
- * body: { identifier, password } - identifier is username OR email.
+ * body: { identifier, password } — identifier is email OR username.
  */
 const login = async (req, res, next) => {
   try {
@@ -198,13 +227,12 @@ const login = async (req, res, next) => {
     });
 
     if (!user || !user.password) {
-      return res.status(400).json({ success: false, message: "Invalid credentials" });
+      return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
-
     if (!isMatch) {
-      return res.status(400).json({ success: false, message: "Invalid credentials" });
+      return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 
     const token = generateToken(user);
@@ -220,11 +248,11 @@ const login = async (req, res, next) => {
   }
 };
 
+// ─── Google OAuth ─────────────────────────────────────────────────────────────
+
 /**
  * POST /api/auth/google-login
  * body: { idToken }
- * Verifies the Google ID token (issued by Google Identity Services on the
- * frontend) and logs the user in, auto-creating an account on first sign-in.
  */
 const googleLogin = async (req, res, next) => {
   try {
@@ -277,11 +305,11 @@ const googleLogin = async (req, res, next) => {
   }
 };
 
+// ─── Login OTP ────────────────────────────────────────────────────────────────
+
 /**
  * POST /api/auth/login-otp/send
  * body: { email }
- * Sends a one-time login code to an existing account's email, as an
- * alternative to typing a password.
  */
 const sendLoginOtp = async (req, res, next) => {
   try {
@@ -292,20 +320,37 @@ const sendLoginOtp = async (req, res, next) => {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
-    const user = await User.findOne({ email: normalizedEmail });
 
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "No account found with this email",
+      // Return 200 to avoid leaking whether an account exists
+      return res.json({
+        success: true,
+        message: "If an account exists with this email, a login code has been sent.",
       });
     }
 
-    const code = generateOtpCode();
+    // 60-second cooldown between resend requests
+    const recent = await Otp.findOne({
+      identifier: normalizedEmail,
+      channel: "email",
+      purpose: "login",
+    }).sort({ createdAt: -1 });
 
+    if (recent) {
+      const secondsAgo = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
+      if (secondsAgo < 60) {
+        const wait = Math.ceil(60 - secondsAgo);
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${wait} second${wait === 1 ? "" : "s"} before requesting a new code.`,
+        });
+      }
+    }
+
+    const code = generateOtpCode();
     await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "login" });
     await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "login", code });
-
     await sendOtpEmail(normalizedEmail, code, "login");
 
     res.json({ success: true, message: "Login code sent to your email" });
@@ -317,8 +362,6 @@ const sendLoginOtp = async (req, res, next) => {
 /**
  * POST /api/auth/login-otp/verify
  * body: { email, otp }
- * Verifies the login code and signs the user in, same response shape as
- * the regular password login.
  */
 const verifyLoginOtp = async (req, res, next) => {
   try {
@@ -336,25 +379,9 @@ const verifyLoginOtp = async (req, res, next) => {
       purpose: "login",
     }).sort({ createdAt: -1 });
 
-    if (!otpRecord) {
-      return res.status(400).json({
-        success: false,
-        message: "Code expired or not found. Please request a new one.",
-      });
-    }
-
-    if (otpRecord.attempts >= 5) {
-      await otpRecord.deleteOne();
-      return res.status(429).json({
-        success: false,
-        message: "Too many incorrect attempts. Please request a new code.",
-      });
-    }
-
-    if (otpRecord.code !== otp) {
-      otpRecord.attempts += 1;
-      await otpRecord.save();
-      return res.status(400).json({ success: false, message: "Invalid code" });
+    const check = await verifyOtpRecord(otpRecord, otp);
+    if (!check.ok) {
+      return res.status(check.status).json({ success: false, message: check.message });
     }
 
     const user = await User.findOne({ email: normalizedEmail });
@@ -377,11 +404,11 @@ const verifyLoginOtp = async (req, res, next) => {
   }
 };
 
+// ─── Forgot Password ──────────────────────────────────────────────────────────
+
 /**
  * POST /api/auth/forgot-password/send
  * body: { email }
- * Sends a password-reset code. Works for any existing account, including
- * Google sign-ins that don't have a password yet (lets them set one).
  */
 const sendResetOtp = async (req, res, next) => {
   try {
@@ -392,20 +419,37 @@ const sendResetOtp = async (req, res, next) => {
     }
 
     const normalizedEmail = email.toLowerCase().trim();
-    const user = await User.findOne({ email: normalizedEmail });
 
+    const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "No account found with this email",
+      // Return 200 to avoid leaking whether an account exists
+      return res.json({
+        success: true,
+        message: "If an account exists with this email, a reset code has been sent.",
       });
     }
 
-    const code = generateOtpCode();
+    // 60-second cooldown between resend requests
+    const recent = await Otp.findOne({
+      identifier: normalizedEmail,
+      channel: "email",
+      purpose: "reset",
+    }).sort({ createdAt: -1 });
 
+    if (recent) {
+      const secondsAgo = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
+      if (secondsAgo < 60) {
+        const wait = Math.ceil(60 - secondsAgo);
+        return res.status(429).json({
+          success: false,
+          message: `Please wait ${wait} second${wait === 1 ? "" : "s"} before requesting a new code.`,
+        });
+      }
+    }
+
+    const code = generateOtpCode();
     await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "reset" });
     await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "reset", code });
-
     await sendOtpEmail(normalizedEmail, code, "reset");
 
     res.json({ success: true, message: "Reset code sent to your email" });
@@ -417,7 +461,6 @@ const sendResetOtp = async (req, res, next) => {
 /**
  * POST /api/auth/forgot-password/reset
  * body: { email, otp, newPassword }
- * Verifies the reset code and sets (or replaces) the account's password.
  */
 const resetPassword = async (req, res, next) => {
   try {
@@ -445,25 +488,9 @@ const resetPassword = async (req, res, next) => {
       purpose: "reset",
     }).sort({ createdAt: -1 });
 
-    if (!otpRecord) {
-      return res.status(400).json({
-        success: false,
-        message: "Code expired or not found. Please request a new one.",
-      });
-    }
-
-    if (otpRecord.attempts >= 5) {
-      await otpRecord.deleteOne();
-      return res.status(429).json({
-        success: false,
-        message: "Too many incorrect attempts. Please request a new code.",
-      });
-    }
-
-    if (otpRecord.code !== otp) {
-      otpRecord.attempts += 1;
-      await otpRecord.save();
-      return res.status(400).json({ success: false, message: "Invalid code" });
+    const check = await verifyOtpRecord(otpRecord, otp);
+    if (!check.ok) {
+      return res.status(check.status).json({ success: false, message: check.message });
     }
 
     const user = await User.findOne({ email: normalizedEmail });
@@ -476,15 +503,17 @@ const resetPassword = async (req, res, next) => {
 
     await otpRecord.deleteOne();
 
-    res.json({ success: true, message: "Password updated. You can now log in." });
+    res.json({ success: true, message: "Password updated successfully. You can now log in." });
   } catch (error) {
     next(error);
   }
 };
 
+// ─── Me ───────────────────────────────────────────────────────────────────────
+
 /**
  * GET /api/auth/me
- * Returns the currently authenticated user (requires `protect` middleware).
+ * Requires `protect` middleware.
  */
 const getMe = async (req, res) => {
   res.json({ success: true, user: req.user });
