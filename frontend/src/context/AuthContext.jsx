@@ -48,6 +48,29 @@ export const AuthProvider = ({ children }) => {
     return data;
   };
 
+  // ----- Login with email OTP (alternative to password) -----
+  const sendLoginOtp = async (email) => {
+    const { data } = await api.post("/auth/login-otp/send", { email });
+    return data;
+  };
+
+  const loginWithOtp = async (email, otp) => {
+    const { data } = await api.post("/auth/login-otp/verify", { email, otp });
+    login(data.token, data.user);
+    return data;
+  };
+
+  // ----- Forgot / set password -----
+  const sendResetOtp = async (email) => {
+    const { data } = await api.post("/auth/forgot-password/send", { email });
+    return data;
+  };
+
+  const resetPassword = async (email, otp, newPassword) => {
+    const { data } = await api.post("/auth/forgot-password/reset", { email, otp, newPassword });
+    return data;
+  };
+
   const googleLogin = async (idToken) => {
     const { data } = await api.post("/auth/google-login", { idToken });
     login(data.token, data.user);
@@ -66,6 +89,10 @@ export const AuthProvider = ({ children }) => {
         sendOtp,
         register,
         loginUser,
+        sendLoginOtp,
+        loginWithOtp,
+        sendResetOtp,
+        resetPassword,
         googleLogin,
       }}
     >

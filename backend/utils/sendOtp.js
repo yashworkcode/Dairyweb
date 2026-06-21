@@ -24,23 +24,39 @@ const getMailTransporter = () => {
   return mailTransporter;
 };
 
+const OTP_COPY = {
+  signup: {
+    subject: "Your Vaishnavi Milk Dairy verification code",
+    intro: "Your one-time verification code is:",
+  },
+  login: {
+    subject: "Your Vaishnavi Milk Dairy login code",
+    intro: "Use this code to log in:",
+  },
+  reset: {
+    subject: "Your Vaishnavi Milk Dairy password reset code",
+    intro: "Use this code to reset your password:",
+  },
+};
+
 /**
  * Sends an OTP code via email. Falls back to console logging when SMTP is not
  * configured, which keeps local development frictionless.
  */
-const sendOtpEmail = async (email, code) => {
+const sendOtpEmail = async (email, code, purpose = "signup") => {
   const transporter = getMailTransporter();
+  const copy = OTP_COPY[purpose] || OTP_COPY.signup;
 
   if (!transporter) {
-    console.log(`[DEV OTP] Email OTP for ${email}: ${code}`);
+    console.log(`[DEV OTP] (${purpose}) Email OTP for ${email}: ${code}`);
     return;
   }
 
   await transporter.sendMail({
     from: process.env.SMTP_FROM || "Vaishnavi Milk Dairy <no-reply@vaishnavimilkdairy.com>",
     to: email,
-    subject: "Your Vaishnavi Milk Dairy verification code",
-    html: `<p>Your one-time verification code is:</p><h2>${code}</h2><p>This code expires in 5 minutes.</p>`,
+    subject: copy.subject,
+    html: `<p>${copy.intro}</p><h2>${code}</h2><p>This code expires in 5 minutes. If you didn't request this, you can safely ignore this email.</p>`,
   });
 };
 

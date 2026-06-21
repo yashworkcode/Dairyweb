@@ -77,10 +77,10 @@ const sendOtp = async (req, res, next) => {
     const code = generateOtpCode();
 
     // Replace any previous unused OTP for this email.
-    await Otp.deleteMany({ identifier: email, channel: "email" });
-    await Otp.create({ identifier: email, channel: "email", code });
+    await Otp.deleteMany({ identifier: email, channel: "email", purpose: "signup" });
+    await Otp.create({ identifier: email, channel: "email", purpose: "signup", code });
 
-    await sendOtpEmail(email, code);
+    await sendOtpEmail(email, code, "signup");
 
     res.json({ success: true, message: "OTP sent to your email" });
   } catch (error) {
@@ -117,6 +117,7 @@ const register = async (req, res, next) => {
     const otpRecord = await Otp.findOne({
       identifier: normalizedEmail,
       channel: "email",
+      purpose: "signup",
     }).sort({ createdAt: -1 });
 
     if (!otpRecord) {
@@ -277,6 +278,211 @@ const googleLogin = async (req, res, next) => {
 };
 
 /**
+ * POST /api/auth/login-otp/send
+ * body: { email }
+ * Sends a one-time login code to an existing account's email, as an
+ * alternative to typing a password.
+ */
+const sendLoginOtp = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "No account found with this email",
+      });
+    }
+
+    const code = generateOtpCode();
+
+    await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "login" });
+    await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "login", code });
+
+    await sendOtpEmail(normalizedEmail, code, "login");
+
+    res.json({ success: true, message: "Login code sent to your email" });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/auth/login-otp/verify
+ * body: { email, otp }
+ * Verifies the login code and signs the user in, same response shape as
+ * the regular password login.
+ */
+const verifyLoginOtp = async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: "Email and OTP are required" });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const otpRecord = await Otp.findOne({
+      identifier: normalizedEmail,
+      channel: "email",
+      purpose: "login",
+    }).sort({ createdAt: -1 });
+
+    if (!otpRecord) {
+      return res.status(400).json({
+        success: false,
+        message: "Code expired or not found. Please request a new one.",
+      });
+    }
+
+    if (otpRecord.attempts >= 5) {
+      await otpRecord.deleteOne();
+      return res.status(429).json({
+        success: false,
+        message: "Too many incorrect attempts. Please request a new code.",
+      });
+    }
+
+    if (otpRecord.code !== otp) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return res.status(400).json({ success: false, message: "Invalid code" });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Account no longer exists" });
+    }
+
+    await otpRecord.deleteOne();
+
+    const token = generateToken(user);
+
+    res.json({
+      success: true,
+      message: "Login successful",
+      token,
+      user: toPublicUser(user),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/auth/forgot-password/send
+ * body: { email }
+ * Sends a password-reset code. Works for any existing account, including
+ * Google sign-ins that don't have a password yet (lets them set one).
+ */
+const sendResetOtp = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: normalizedEmail });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "No account found with this email",
+      });
+    }
+
+    const code = generateOtpCode();
+
+    await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "reset" });
+    await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "reset", code });
+
+    await sendOtpEmail(normalizedEmail, code, "reset");
+
+    res.json({ success: true, message: "Reset code sent to your email" });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * POST /api/auth/forgot-password/reset
+ * body: { email, otp, newPassword }
+ * Verifies the reset code and sets (or replaces) the account's password.
+ */
+const resetPassword = async (req, res, next) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, OTP and new password are all required",
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters long",
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+
+    const otpRecord = await Otp.findOne({
+      identifier: normalizedEmail,
+      channel: "email",
+      purpose: "reset",
+    }).sort({ createdAt: -1 });
+
+    if (!otpRecord) {
+      return res.status(400).json({
+        success: false,
+        message: "Code expired or not found. Please request a new one.",
+      });
+    }
+
+    if (otpRecord.attempts >= 5) {
+      await otpRecord.deleteOne();
+      return res.status(429).json({
+        success: false,
+        message: "Too many incorrect attempts. Please request a new code.",
+      });
+    }
+
+    if (otpRecord.code !== otp) {
+      otpRecord.attempts += 1;
+      await otpRecord.save();
+      return res.status(400).json({ success: false, message: "Invalid code" });
+    }
+
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Account no longer exists" });
+    }
+
+    user.password = await bcrypt.hash(newPassword, 10);
+    await user.save();
+
+    await otpRecord.deleteOne();
+
+    res.json({ success: true, message: "Password updated. You can now log in." });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
  * GET /api/auth/me
  * Returns the currently authenticated user (requires `protect` middleware).
  */
@@ -289,5 +495,9 @@ module.exports = {
   register,
   login,
   googleLogin,
+  sendLoginOtp,
+  verifyLoginOtp,
+  sendResetOtp,
+  resetPassword,
   getMe,
 };

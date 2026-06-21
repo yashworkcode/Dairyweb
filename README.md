@@ -58,4 +58,3 @@ cp .env.example .env       # set VITE_API_BASE_URL etc. (see section 4)
 npm install
 npm run dev                 # starts on http://localhost:5173
 ```
-
