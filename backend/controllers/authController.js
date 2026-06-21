@@ -285,14 +285,23 @@ const googleLogin = async (req, res, next) => {
  */
 const sendLoginOtp = async (req, res, next) => {
   try {
+    console.log("STEP 1");
+
     const { email } = req.body;
+    console.log("STEP 2:", email);
 
     if (!email) {
-      return res.status(400).json({ success: false, message: "Email is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
     }
 
     const normalizedEmail = email.toLowerCase().trim();
+    console.log("STEP 3");
+
     const user = await User.findOne({ email: normalizedEmail });
+    console.log("STEP 4:", !!user);
 
     if (!user) {
       return res.status(404).json({
@@ -302,15 +311,37 @@ const sendLoginOtp = async (req, res, next) => {
     }
 
     const code = generateOtpCode();
+    console.log("STEP 5");
 
-    await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "login" });
-    await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "login", code });
+    await Otp.deleteMany({
+      identifier: normalizedEmail,
+      channel: "email",
+      purpose: "login",
+    });
+    console.log("STEP 6");
+
+    await Otp.create({
+      identifier: normalizedEmail,
+      channel: "email",
+      purpose: "login",
+      code,
+    });
+    console.log("STEP 7");
 
     await sendOtpEmail(normalizedEmail, code, "login");
+    console.log("STEP 8");
 
-    res.json({ success: true, message: "Login code sent to your email" });
+    res.json({
+      success: true,
+      message: "Login code sent to your email",
+    });
   } catch (error) {
-    next(error);
+    console.error("LOGIN OTP ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
   }
 };
 
