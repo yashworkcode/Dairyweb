@@ -22,7 +22,7 @@ const Checkout = () => {
   const { items, totalPrice, clearCart } = useCart();
   const { user } = useAuth();
   const navigate = useNavigate();
-  const whatsappNumber = import.meta.env.VITE_WHATSAPP_NUMBER || "9506236287";
+  const whatsappNumber = import.meta.env.VITE_WHATSAPP_NUMBER || "919506236287";
 
   const [form, setForm] = useState({
     fullName: user?.name || "",
