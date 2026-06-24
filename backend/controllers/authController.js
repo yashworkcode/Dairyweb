@@ -7,6 +7,22 @@ const { generateOtpCode, sendOtpEmail } = require("../utils/sendOtp");
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+/** Masks an email/username for safe logging, e.g. "jo***@gmail.com" */
+const maskId = (value) => {
+  if (!value) return "unknown";
+  const str = String(value);
+  if (str.includes("@")) {
+    const [local, domain] = str.split("@");
+    return `${local.slice(0, 2)}${"*".repeat(Math.max(local.length - 2, 1))}@${domain}`;
+  }
+  return str;
+};
+
+/** Centralized auth event logger so the whole signup/login/OTP/reset flow is traceable. */
+const log = (event, details = {}) => {
+  console.log(`[AUTH] ${new Date().toISOString()} | ${event} |`, details);
+};
+
 /** Builds a public-safe user object — never exposes the password hash. */
 const toPublicUser = (user) => ({
   id: user._id,
@@ -93,6 +109,7 @@ const sendOtp = async (req, res, next) => {
 
     const existingUser = await User.findOne({ email });
     if (existingUser) {
+      log("signup-otp.blocked.existing-account", { email: maskId(email) });
       return res.status(400).json({
         success: false,
         message: "An account with this email already exists. Please log in instead.",
@@ -110,6 +127,7 @@ const sendOtp = async (req, res, next) => {
       const secondsAgo = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
       if (secondsAgo < 60) {
         const wait = Math.ceil(60 - secondsAgo);
+        log("signup-otp.cooldown", { email: maskId(email), waitSeconds: wait });
         return res.status(429).json({
           success: false,
           message: `Please wait ${wait} second${wait === 1 ? "" : "s"} before requesting a new OTP.`,
@@ -121,9 +139,11 @@ const sendOtp = async (req, res, next) => {
     await Otp.deleteMany({ identifier: email, channel: "email", purpose: "signup" });
     await Otp.create({ identifier: email, channel: "email", purpose: "signup", code });
     await sendOtpEmail(email, code, "signup");
+    log("signup-otp.sent", { email: maskId(email) });
 
     res.json({ success: true, message: "OTP sent to your email" });
   } catch (error) {
+    log("signup-otp.error", { message: error.message });
     next(error);
   }
 };
@@ -163,6 +183,7 @@ const register = async (req, res, next) => {
 
     const check = await verifyOtpRecord(otpRecord, otp);
     if (!check.ok) {
+      log("register.otp-invalid", { email: maskId(normalizedEmail), reason: check.message });
       return res.status(check.status).json({ success: false, message: check.message });
     }
 
@@ -171,6 +192,7 @@ const register = async (req, res, next) => {
     });
 
     if (existingUser) {
+      log("register.blocked.duplicate", { email: maskId(normalizedEmail) });
       return res.status(400).json({
         success: false,
         message:
@@ -192,6 +214,7 @@ const register = async (req, res, next) => {
     });
 
     await otpRecord.deleteOne();
+    log("register.success", { email: maskId(normalizedEmail), username: normalizedUsername });
 
     res.status(201).json({
       success: true,
@@ -199,6 +222,7 @@ const register = async (req, res, next) => {
       user: toPublicUser(user),
     });
   } catch (error) {
+    log("register.error", { message: error.message });
     next(error);
   }
 };
@@ -227,15 +251,18 @@ const login = async (req, res, next) => {
     });
 
     if (!user || !user.password) {
+      log("login.failed", { identifier: maskId(normalizedIdentifier), reason: "no-account-or-no-password" });
       return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
+      log("login.failed", { identifier: maskId(normalizedIdentifier), reason: "wrong-password" });
       return res.status(401).json({ success: false, message: "Invalid credentials" });
     }
 
     const token = generateToken(user);
+    log("login.success", { identifier: maskId(normalizedIdentifier) });
 
     res.json({
       success: true,
@@ -244,6 +271,7 @@ const login = async (req, res, next) => {
       user: toPublicUser(user),
     });
   } catch (error) {
+    log("login.error", { message: error.message });
     next(error);
   }
 };
@@ -293,6 +321,7 @@ const googleLogin = async (req, res, next) => {
     }
 
     const token = generateToken(user);
+    log("google-login.success", { email: maskId(normalizedEmail) });
 
     res.json({
       success: true,
@@ -301,6 +330,7 @@ const googleLogin = async (req, res, next) => {
       user: toPublicUser(user),
     });
   } catch (error) {
+    log("google-login.error", { message: error.message });
     next(error);
   }
 };
@@ -324,6 +354,7 @@ const sendLoginOtp = async (req, res, next) => {
     const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       // Return 200 to avoid leaking whether an account exists
+      log("login-otp.no-account", { email: maskId(normalizedEmail) });
       return res.json({
         success: true,
         message: "If an account exists with this email, a login code has been sent.",
@@ -341,6 +372,7 @@ const sendLoginOtp = async (req, res, next) => {
       const secondsAgo = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
       if (secondsAgo < 60) {
         const wait = Math.ceil(60 - secondsAgo);
+        log("login-otp.cooldown", { email: maskId(normalizedEmail), waitSeconds: wait });
         return res.status(429).json({
           success: false,
           message: `Please wait ${wait} second${wait === 1 ? "" : "s"} before requesting a new code.`,
@@ -352,9 +384,11 @@ const sendLoginOtp = async (req, res, next) => {
     await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "login" });
     await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "login", code });
     await sendOtpEmail(normalizedEmail, code, "login");
+    log("login-otp.sent", { email: maskId(normalizedEmail) });
 
     res.json({ success: true, message: "Login code sent to your email" });
   } catch (error) {
+    log("login-otp.error", { message: error.message });
     next(error);
   }
 };
@@ -381,6 +415,7 @@ const verifyLoginOtp = async (req, res, next) => {
 
     const check = await verifyOtpRecord(otpRecord, otp);
     if (!check.ok) {
+      log("login-otp.invalid", { email: maskId(normalizedEmail), reason: check.message });
       return res.status(check.status).json({ success: false, message: check.message });
     }
 
@@ -392,6 +427,7 @@ const verifyLoginOtp = async (req, res, next) => {
     await otpRecord.deleteOne();
 
     const token = generateToken(user);
+    log("login-otp.success", { email: maskId(normalizedEmail) });
 
     res.json({
       success: true,
@@ -400,6 +436,7 @@ const verifyLoginOtp = async (req, res, next) => {
       user: toPublicUser(user),
     });
   } catch (error) {
+    log("login-otp.error", { message: error.message });
     next(error);
   }
 };
@@ -423,6 +460,7 @@ const sendResetOtp = async (req, res, next) => {
     const user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       // Return 200 to avoid leaking whether an account exists
+      log("reset-otp.no-account", { email: maskId(normalizedEmail) });
       return res.json({
         success: true,
         message: "If an account exists with this email, a reset code has been sent.",
@@ -440,6 +478,7 @@ const sendResetOtp = async (req, res, next) => {
       const secondsAgo = (Date.now() - new Date(recent.createdAt).getTime()) / 1000;
       if (secondsAgo < 60) {
         const wait = Math.ceil(60 - secondsAgo);
+        log("reset-otp.cooldown", { email: maskId(normalizedEmail), waitSeconds: wait });
         return res.status(429).json({
           success: false,
           message: `Please wait ${wait} second${wait === 1 ? "" : "s"} before requesting a new code.`,
@@ -451,9 +490,11 @@ const sendResetOtp = async (req, res, next) => {
     await Otp.deleteMany({ identifier: normalizedEmail, channel: "email", purpose: "reset" });
     await Otp.create({ identifier: normalizedEmail, channel: "email", purpose: "reset", code });
     await sendOtpEmail(normalizedEmail, code, "reset");
+    log("reset-otp.sent", { email: maskId(normalizedEmail) });
 
     res.json({ success: true, message: "Reset code sent to your email" });
   } catch (error) {
+    log("reset-otp.error", { message: error.message });
     next(error);
   }
 };
@@ -490,6 +531,7 @@ const resetPassword = async (req, res, next) => {
 
     const check = await verifyOtpRecord(otpRecord, otp);
     if (!check.ok) {
+      log("reset-password.otp-invalid", { email: maskId(normalizedEmail), reason: check.message });
       return res.status(check.status).json({ success: false, message: check.message });
     }
 
@@ -502,9 +544,11 @@ const resetPassword = async (req, res, next) => {
     await user.save();
 
     await otpRecord.deleteOne();
+    log("reset-password.success", { email: maskId(normalizedEmail) });
 
     res.json({ success: true, message: "Password updated successfully. You can now log in." });
   } catch (error) {
+    log("reset-password.error", { message: error.message });
     next(error);
   }
 };
