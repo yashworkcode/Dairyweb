@@ -17,6 +17,14 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+transporter.verify((error, success) => {
+  if (error) {
+    console.error("SMTP Verify Error:", error);
+  } else {
+    console.log("SMTP Server is ready");
+  }
+});
+
 const OTP_COPY = {
   signup: {
     subject: "Your Vaishnavi Milk Dairy verification code",
